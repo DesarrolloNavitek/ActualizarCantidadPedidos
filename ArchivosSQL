@@ -1,0 +1,193 @@
+SET DATEFIRST 7
+SET ANSI_NULLS OFF
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+SET LOCK_TIMEOUT -1
+SET QUOTED_IDENTIFIER OFF
+GO
+IF EXISTS (SELECT 1 FROM SYS.OBJECTS WHERE name = 'nvk_tb_HistCantidad_V' AND type = 'U')
+DROP TABLE dbo.nvk_tb_HistCantidad_V
+GO
+CREATE TABLE dbo.nvk_tb_HistCantidad_V (
+			Id					int		Identity(1,1),
+			IdMov				int,
+			Mov					varchar(20),
+			Movid				varchar(20),
+			Articulo			varchar(20),
+			Renglon				float,
+			RenglonSub			int,
+			Usuario				varchar(10),
+			CanitdadO			float,
+			Actualizacion		datetime
+			
+)
+GO
+IF EXISTS (SELECT 1 FROM SYS.objects WHERE NAME ='spNTVentaPedidoCantidadActualizar' AND TYPE = 'p')
+DROP PROC dbo.spNTVentaPedidoCantidadActualizar
+GO
+CREATE PROCEDURE spNTVentaPedidoCantidadActualizar
+    @ID				int,
+	@Usuario		varchar(10),
+    @Renglon		float,
+    @RenglonSub		int,
+    @Cantidad		float
+AS
+BEGIN
+  DECLARE
+  @Estatus				varchar(15),
+  @Almacen				varchar(10),
+  @CantidadPendiente    float,
+  @CantidadD			float,
+  @Articulo				varchar(20),
+  @Mov					varchar(20),
+  @Movid				varchar(20),
+  @CantidadM			float,
+  @AccesoID				int,
+  @CantidadOriginal		float
+
+
+  SELECT    @Estatus						= Estatus, 
+			@Mov							= Mov,
+			@MovId							= MovId,
+			@Almacen						= e.Almacen, 
+			@CantidadPendiente				= ISNULL(d.CantidadPendiente, 0),
+			@CantidadD						= ISNULL(d.Cantidad, 0),
+			@Articulo						= d.Articulo
+    FROM Venta e
+    JOIN VentaD d ON e.ID = d.ID
+   WHERE e.ID			= @ID
+     AND d.Renglon		= @Renglon
+     AND d.RenglonSub	= @RenglonSub
+
+  IF @Estatus <> 'PENDIENTE'
+  BEGIN
+    SELECT 'Estatus Incorrecto'
+    RETURN
+  END
+  ELSE
+  IF @Cantidad < @CantidadPendiente
+  BEGIN
+      SELECT 'La Cantidad debe ser mayor al Pendiente'
+      RETURN
+  END
+
+  IF NOT EXISTS (SELECT 1 FROM nvk_tb_HistCantidad_V WHERE IdMov = @ID AND Renglon = @Renglon AND RenglonSub = @RenglonSub AND Articulo = @Articulo)
+
+  INSERT INTO nvk_tb_HistCantidad_V (IdMov, Mov,	Movid,	Articulo,	Renglon,	RenglonSub,		Usuario,		CanitdadO,		Actualizacion)
+							VALUES (@ID,	@Mov,	@MovId,@Articulo,	@Renglon,	@RenglonSub,	@Usuario,		@CantidadD,		GETDATE())
+
+
+	SELECT @CantidadM = ((CanitdadO *0.10) + CanitdadO)
+	  FROM nvk_tb_HistCantidad_V 
+	 WHERE @ID = IdMov 
+	   AND @Mov = Mov 
+	   AND @MovId = Movid 
+	   AND @Articulo = Articulo 
+	   AND @Renglon = Renglon 
+	   AND @RenglonSub = RenglonSub
+  
+  IF @Cantidad > @CantidadM
+  BEGIN
+	SELECT 'El porcentaje máximo del cambio de cantidad no puede ser superior al 10 % '
+	RETURN
+  END
+  
+  
+  BEGIN
+            IF EXISTS(SELECT *
+                        FROM MovFlujo
+                       WHERE OModulo = 'VTAS' 
+					     AND OID = @ID 
+						 AND DModulo = 'TMA' 
+						 AND Cancelado = 0)
+            BEGIN
+              SELECT 'El movimiento ya tiene una Orden de Surtido'
+              RETURN
+            END
+            ELSE
+            BEGIN
+              UPDATE VentaD SET Cantidad = @Cantidad, CantidadPendiente = @Cantidad
+               WHERE ID = @ID
+                 AND Renglon = @Renglon
+                 AND RenglonSub = @RenglonSub
+
+              UPDATE NVKVentaTMASurtida SET Cantidad = @Cantidad
+               WHERE ID = @ID
+                 AND Renglon = @Renglon
+                 AND RenglonSub = @RenglonSub
+
+              SELECT 'Registro Actualizado'
+            END
+  END
+
+END
+/* respaldo
+CREATE PROCEDURE spNTVentaPedidoCantidadActualizar
+    @ID           int,
+    @Renglon      float,
+    @RenglonSub   int,
+    @Cantidad     float
+AS
+BEGIN
+  DECLARE
+  @Estatus        varchar(15),
+  @Almacen        varchar(10),
+  @CantidadPendiente    float
+
+  SELECT @Estatus = Estatus, @Almacen = e.Almacen, @CantidadPendiente = ISNULL(d.CantidadPendiente, 0)
+    FROM Venta e
+    JOIN VentaD d ON e.ID = d.ID
+   WHERE e.ID = @ID
+     AND d.Renglon = @Renglon
+     AND d.RenglonSub = @RenglonSub
+
+  IF @Estatus <> 'PENDIENTE'
+  BEGIN
+    SELECT 'Estatus Incorrecto'
+    RETURN
+  END
+  ELSE
+  BEGIN
+    IF @Cantidad < @CantidadPendiente
+    BEGIN
+      SELECT 'La Cantidad debe ser mayor al Pendiente'
+      RETURN
+    END
+    ELSE
+    BEGIN
+      BEGIN
+      /*
+        IF(SELECT ISNULL(WMS, 0) FROM Alm WHERE Almacen = @Almacen) <> 1
+        BEGIN
+          SELECT 'El Pedido no es de un Almacén de WMS'
+          RETURN
+        END
+        ELSE*/
+          BEGIN
+            IF EXISTS(SELECT *
+                        FROM MovFlujo
+                       WHERE OModulo = 'VTAS' AND OID = @ID AND DModulo = 'TMA' AND Cancelado = 0)
+            BEGIN
+              SELECT 'El movimiento ya tiene una Orden de Surtido'
+              RETURN
+            END
+            ELSE
+            BEGIN
+              UPDATE VentaD SET Cantidad = @Cantidad, CantidadPendiente = @Cantidad
+               WHERE ID = @ID
+                 AND Renglon = @Renglon
+                 AND RenglonSub = @RenglonSub
+
+              UPDATE NVKVentaTMASurtida SET Cantidad = @Cantidad
+               WHERE ID = @ID
+                 AND Renglon = @Renglon
+                 AND RenglonSub = @RenglonSub
+
+              SELECT 'Registro Actualizado'
+            END
+          END
+      END
+    END
+  END
+
+END
+*/
